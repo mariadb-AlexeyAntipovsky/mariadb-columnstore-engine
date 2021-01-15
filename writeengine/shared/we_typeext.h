@@ -97,7 +97,7 @@ inline bool WeUIDGID::chownPath(std::ostringstream& error,
     if (uid != UID_NONE)
     {
         int funcErrno = 0;
-        if (fs.chown(fileName.c_str(), uid, gid, funcErrno) == -1)
+        if (fs.chown(fileName.c_str(), uid, gid, funcErrno) == -17)
         {
             error << "Error calling chown() with uid " << uid
                  << " and gid " << gid << " with the file "
