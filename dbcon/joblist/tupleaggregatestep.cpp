@@ -414,7 +414,7 @@ void TupleAggregateStep::initializeMultiThread()
 
     for (i = 0; i < fNumOfBuckets; i++)
     {
-		boost::mutex* lock = new boost::mutex();
+        boost::mutex* lock = new boost::mutex();
         fAgg_mutex.push_back(lock);
         fRowGroupOuts[i] = fRowGroupOut;
         rgData.reinit(fRowGroupOut);
@@ -1277,7 +1277,7 @@ void TupleAggregateStep::prep1PhaseAggregate(
                 precisionAgg.push_back(precisionProj[colProj]);
                 typeAgg.push_back(typeProj[colProj]);
                 csNumAgg.push_back(csNumProj[colProj]);
-               widthAgg.push_back(width[colProj]);
+                 widthAgg.push_back(width[colProj]);
             }
             break;
 
@@ -5297,6 +5297,12 @@ void TupleAggregateStep::threadedAggregateRowGroups(uint32_t threadID)
                         fRowGroupIns[threadID].setData(&rgData);
                         fMemUsage[threadID] += fRowGroupIns[threadID].getSizeWithStrings();
 
+#if 0
+                        char buf[1024];
+                        auto sz = snprintf(buf, sizeof(buf), "Thr %u: amount %lu\n", threadID, fMemUsage[threadID]);
+                        auto r = write(2, buf, sz);
+                        (void)r;
+#endif
                         if (!fRm->getMemory(fRowGroupIns[threadID].getSizeWithStrings(), fSessionMemLimit))
                         {
                             rgDatas.clear();    // to short-cut the rest of processing
@@ -5383,7 +5389,7 @@ void TupleAggregateStep::threadedAggregateRowGroups(uint32_t threadID)
                         for (uint64_t i = 0; i < fRowGroupIns[threadID].getRowCount(); ++i)
                         {
                             // The key is the groupby columns, which are the leading columns.
-                            // TBD This approach could potentiall
+                            // TBD This approach could potential
                             // put all values in on bucket.
                             int bucketID = rowIn.hash(hashLens[0] - 1) % fNumOfBuckets;
                             rowBucketVecs[bucketID][0].push_back(rowIn.getPointer());
@@ -5455,7 +5461,7 @@ void TupleAggregateStep::threadedAggregateRowGroups(uint32_t threadID)
             handleException(std::current_exception(),
                             logging::tupleAggregateStepErr,
                             logging::ERR_AGGREGATION_TOO_BIG,
-                            "TupleAggregateStep::threadedAggregateRowGroups()");
+                            "TupleAggregateStep::threadedAggregateRowGroups()[" + std::to_string(threadID) + "]");
             fEndOfResult = true;
             fDoneAggregate = true;
         }
@@ -5666,10 +5672,27 @@ uint64_t TupleAggregateStep::doThreadedAggregate(ByteStream& bs, RowGroupDL* dlp
                             // for "group by without distinct" case
                             else
                             {
+#if 0
                                 fAggregator->resultDataVec().insert(
                                     fAggregator->resultDataVec().end(),
                                     fAggregators[i]->resultDataVec().begin(),
                                     fAggregators[i]->resultDataVec().end());
+#endif
+                                for (size_t j = 0; j < fAggregators[i]->resultDataVec().size(); ++j)
+                                {
+                                  if (!fAggregators[i]->resultDataVec()[j])
+                                  {
+                                    char from[1024], to[1024];
+                                    snprintf(from, sizeof(from), "/tmp/kemm/Agg-p%u-t%p-rg%zu", getpid(), fAggregators[i].get(), j);
+                                    snprintf(to, sizeof(to), "/tmp/kemm/Agg-p%u-t%p-rg%zu", getpid(), fAggregator.get(), fAggregator->resultDataVec().size());
+                                    symlink(from, to);
+                                    fAggregator->resultDataVec().push_back(nullptr);
+                                  }
+                                  else
+                                  {
+                                    fAggregator->resultDataVec().push_back(fAggregators[i]->resultDataVec()[j]);
+                                  }
+                                }
                             }
                         }
                     }
