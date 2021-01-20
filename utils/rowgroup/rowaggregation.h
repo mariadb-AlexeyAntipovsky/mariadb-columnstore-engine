@@ -36,8 +36,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #else
-#include <tr1/unordered_map>
-#include <tr1/unordered_set>
+#include <unordered_map>
+#include <unordered_set>
 #endif
 #include <boost/shared_ptr.hpp>
 #include <boost/shared_array.hpp>
@@ -69,9 +69,11 @@ struct RowPosition
 {
     uint64_t group: 48;
     uint64_t row: 16;
+    uint64_t hash = 0x8000000000000000ULL;
 
+    static const uint64_t NAH = 0x8000000000000000ULL;
     static const uint64_t MSB = 0x800000000000ULL;   //48th bit is set
-    inline RowPosition(uint64_t g, uint64_t r) : group(g), row(r) { }
+    inline RowPosition(uint64_t g, uint64_t r, uint64_t h) : group(g), row(r), hash(h) { }
     inline RowPosition() { }
 };
 
@@ -400,15 +402,15 @@ private:
     KeyStorage* ks;
 };
 
-typedef std::tr1::unordered_set<RowPosition, AggHasher, AggComparator, utils::STLPoolAllocator<RowPosition> >
+typedef std::unordered_set<RowPosition, AggHasher, AggComparator, utils::STLPoolAllocator<RowPosition> >
 RowAggMap_t;
 
 #if defined(__GNUC__) && (__GNUC__ == 4 && __GNUC_MINOR__ < 5)
 typedef std::tr1::unordered_map<RowPosition, RowPosition, ExternalKeyHasher, ExternalKeyEq,
         utils::STLPoolAllocator<std::pair<const RowPosition, RowPosition> > > ExtKeyMap_t;
 #else
-typedef std::tr1::unordered_map<RowPosition, RowPosition, ExternalKeyHasher, ExternalKeyEq,
-        utils::STLPoolAllocator<std::pair<RowPosition, RowPosition> > > ExtKeyMap_t;
+typedef std::unordered_map<RowPosition, RowPosition, ExternalKeyHasher, ExternalKeyEq,
+        utils::STLPoolAllocator<std::pair<const RowPosition, RowPosition> > > ExtKeyMap_t;
 #endif
 
 struct GroupConcat
@@ -728,6 +730,10 @@ protected:
 
     // For UDAF along with with multiple distinct columns
     std::vector<SP_ROWAGG_FUNC_t>* fOrigFunctionCols;
+
+    std::unordered_map<uint32_t, uint64_t> ids;
+    std::string l;
+    int logfd;
 };
 
 //------------------------------------------------------------------------------

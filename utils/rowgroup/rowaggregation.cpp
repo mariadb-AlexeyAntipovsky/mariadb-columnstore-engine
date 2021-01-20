@@ -54,6 +54,8 @@
 
 #include "collation.h"
 
+#include "threadnaming.h"
+
 //..comment out NDEBUG to enable assertions, uncomment NDEBUG to disable
 //#define NDEBUG
 
@@ -593,6 +595,9 @@ RowAggregation::RowAggregation() :
     fSmallSideRGs(NULL), fLargeSideRG(NULL), fSmallSideCount(0),
     fOrigFunctionCols(NULL)
 {
+  char buf[1024];
+  snprintf(buf, sizeof(buf), "/tmp/kemm/Agg-p%u-t%p.log", getpid(), this);
+  logfd = open(buf, O_CREAT | O_APPEND | O_WRONLY, 0644);
 }
 
 
@@ -605,6 +610,9 @@ RowAggregation::RowAggregation(const vector<SP_ROWAGG_GRPBY_t>& rowAggGroupByCol
 {
     fGroupByCols.assign(rowAggGroupByCols.begin(), rowAggGroupByCols.end());
     fFunctionCols.assign(rowAggFunctionCols.begin(), rowAggFunctionCols.end());
+  char buf[1024];
+  snprintf(buf, sizeof(buf), "/tmp/kemm/Agg-p%u-t%p.log", getpid(), this);
+  logfd = open(buf, O_CREAT | O_APPEND | O_WRONLY, 0644);
 }
 
 
@@ -619,6 +627,9 @@ RowAggregation::RowAggregation(const RowAggregation& rhs):
 
     fGroupByCols.assign(rhs.fGroupByCols.begin(), rhs.fGroupByCols.end());
     fFunctionCols.assign(rhs.fFunctionCols.begin(), rhs.fFunctionCols.end());
+  char buf[1024];
+  snprintf(buf, sizeof(buf), "/tmp/kemm/Agg-p%u-t%p.log", getpid(), this);
+  logfd = open(buf, O_CREAT | O_APPEND | O_WRONLY, 0644);
 }
 
 
@@ -632,6 +643,7 @@ RowAggregation::~RowAggregation()
         delete fAggMapPtr;
         fAggMapPtr = NULL;
     }
+    close(logfd);
 }
 
 
@@ -840,6 +852,9 @@ void RowAggregation::aggReset()
             resetUDAF(dynamic_cast<RowUDAFFunctionCol*>(fFunctionCols[i].get()));
         }
     }
+
+    l.clear();
+    ids.clear();
 }
 
 
@@ -862,7 +877,7 @@ void RowAggregationUM::aggReset()
 void RowAggregationUM::aggregateRowWithRemap(Row& row)
 {
     pair<ExtKeyMap_t::iterator, bool> inserted;
-    RowPosition pos(RowPosition::MSB, 0);
+    RowPosition pos(RowPosition::MSB, 0, RowPosition::NAH);
 
     tmpRow = &row;
     inserted = fExtKeyMap->insert(pair<RowPosition, RowPosition>(pos, pos));
@@ -881,7 +896,7 @@ void RowAggregationUM::aggregateRowWithRemap(Row& row)
         fRowGroupOut->incRowCount();
         initMapData(row);     //seems heavy-handed
         attachGroupConcatAg();
-        inserted.first->second = RowPosition(fResultDataVec.size() - 1, fRowGroupOut->getRowCount() - 1);
+        inserted.first->second = RowPosition(fResultDataVec.size() - 1, fRowGroupOut->getRowCount() - 1, tmpRow->hash(fGroupByCols.size() - 1));
 
         // If there's UDAF involved, reset the user data.
         if (fOrigFunctionCols)
@@ -937,14 +952,54 @@ void RowAggregation::aggregateRow(Row& row)
 
         // do a speculative insert
         tmpRow = &row;
-        inserted = fAggMapPtr->insert(RowPosition(RowPosition::MSB, 0));
+        uint64_t h = tmpRow->hash(fGroupByCols.size() - 1);
+        l.clear();
+        auto cnt = fAggMapPtr->count(RowPosition(RowPosition::MSB, 0, h));
+        std::string ll = l;
+
+        if (h == RowPosition::NAH) h++;
+        l.clear();
+        inserted = fAggMapPtr->insert(RowPosition(RowPosition::MSB, 0, h));
+
+        if (inserted.second && cnt != 0)
+        {
+          uint32_t uid= row.getIntField(0);
+          std::cerr << utils::getThreadName() << ": WTBH? uid=" << uid
+                    << ", h=(" << h << "," << ids[uid] << ") l=[" << l << "], " << " ll=[" << ll << "]"
+                    << std::endl;
+        }
 
         if (inserted.second)
         {
-#if 0
+            uint32_t uid = row.getIntField(0);
+            if (ids.count(uid) != 0)
+            {
+              char buf[1024];
+              auto sz = snprintf(buf, sizeof(buf), "%s: tid = %d WTF? uid=%u, h=%lu\n",
+                                utils::getThreadName().c_str(),
+                                gettid(),
+                                uid,
+                                h);
+              auto rsz = write(logfd, buf, sz);
+              (void)rsz;
+              std::cerr << utils::getThreadName()
+                        << ": WTF? tid = " << gettid() << " uid=" << uid
+                        << ", h=(" << h << "," << ids[uid] << ") l=[" << l
+                        << "] ll=" << ll << "]" << std::endl;
+            }
+            else
+              ids.insert(std::pair<uint32_t, uint64_t>(uid, h));
+#if 1
             char buf[1024];
-            auto sz = snprintf(buf, sizeof(buf), "rows: %lu, %lu, %u\n", fTotalRowCount + 1, fMaxTotalRowCount, fRowGroupOut->getRowCount());
-            auto rsz = write(2, buf, sz);
+            auto sz = snprintf(buf, sizeof(buf), "%s: a=%p tid = %d rows: %lu, %lu, i=%u, h=%lu\n",
+                              utils::getThreadName().c_str(),
+                              fAggMapPtr,
+                              gettid(),
+                              ids.size(),
+                              fAggMapPtr->size(),
+                              uid,
+                              h);
+            auto rsz = write(logfd, buf, sz);
             (void)rsz;
 #endif
             // if it was successfully inserted, fix the inserted values
@@ -967,7 +1022,7 @@ void RowAggregation::aggregateRow(Row& row)
 
             // replace the key value with an equivalent copy, yes this is OK
             const_cast<RowPosition&>(*(inserted.first)) =
-                RowPosition(fResultDataVec.size() - 1, fRowGroupOut->getRowCount() - 1);
+                RowPosition(fResultDataVec.size() - 1, fRowGroupOut->getRowCount() - 1, h);
 
             // If there's UDAF involved, reset the user data.
             if (fOrigFunctionCols)
@@ -4677,7 +4732,7 @@ void RowAggregationSubDistinct::addRowGroup(const RowGroup* pRows)
         }
 
         tmpRow = &fDistRow;
-        inserted = fAggMapPtr->insert(RowPosition(RowPosition::MSB, 0));
+        inserted = fAggMapPtr->insert(RowPosition(RowPosition::MSB, 0, RowPosition::NAH));
 
         if (inserted.second)
         {
@@ -4693,8 +4748,10 @@ void RowAggregationSubDistinct::addRowGroup(const RowGroup* pRows)
             copyRow(fDistRow, &fRow);
 
             // replace the key value with an equivalent copy, yes this is OK
+            uint64_t h = tmpRow->hash(fGroupByCols.size() - 1);
+            if (h == RowPosition::NAH) h++;
             const_cast<RowPosition&>(*(inserted.first)) =
-                RowPosition(fResultDataVec.size() - 1, fRowGroupOut->getRowCount() - 1);
+                RowPosition(fResultDataVec.size() - 1, fRowGroupOut->getRowCount() - 1, h);
         }
     }
 }
@@ -4717,7 +4774,7 @@ void RowAggregationSubDistinct::addRowGroup(const RowGroup* pRows, std::vector<R
             rowIn.copyField(fDistRow, j, fGroupByCols[j]->fInputColumnIndex);
 
         tmpRow = &fDistRow;
-        inserted = fAggMapPtr->insert(RowPosition(RowPosition::MSB, 0));
+        inserted = fAggMapPtr->insert(RowPosition(RowPosition::MSB, 0, RowPosition::NAH));
 
         if (inserted.second)
         {
@@ -4733,8 +4790,10 @@ void RowAggregationSubDistinct::addRowGroup(const RowGroup* pRows, std::vector<R
             copyRow(fDistRow, &fRow);
 
             // replace the key value with an equivalent copy, yes this is OK
+            uint64_t h = tmpRow->hash(fGroupByCols.size() - 1);
+            if (h == RowPosition::NAH) h++;
             const_cast<RowPosition&>(*(inserted.first)) =
-                RowPosition(fResultDataVec.size() - 1, fRowGroupOut->getRowCount() - 1);
+                RowPosition(fResultDataVec.size() - 1, fRowGroupOut->getRowCount() - 1, h);
         }
     }
 }
@@ -4959,10 +5018,20 @@ inline uint64_t AggHasher::operator()(const RowPosition& data) const
     Row* row;
     RGData rg;
 
+    if (data.hash != RowPosition::NAH)
+    {
+      agg->l.append("H");
+      return data.hash;
+    }
+
     if (data.group == RowPosition::MSB)
-        row = *tmpRow;
+    {
+      agg->l.append("T");
+      row= *tmpRow;
+    }
     else
     {
+      agg->l.append("t");
         if (!agg->fResultDataVec[data.group])
         {
             char fname[1024];
@@ -4991,6 +5060,9 @@ inline uint64_t AggHasher::operator()(const RowPosition& data) const
     }
 
     ret = row->hash(lastKeyCol);
+    if (ret == RowPosition::NAH)
+      ret++;
+    agg->l.append("[").append(std::to_string(ret)).append("]");
     //cout << "hash=" << ret << " keys=" << keyColCount << " row=" << r.toString() << endl;
     return ret;
 }
@@ -5004,17 +5076,24 @@ AggComparator::AggComparator(const Row& row, Row** tRow, uint32_t keyCount, RowA
 inline bool AggComparator::operator()(const RowPosition& d1, const RowPosition& d2) const
 {
     bool ret;
-    Row* pr1, *pr2;
+    Row* pr1 = nullptr, *pr2 = nullptr;
     RGData rg1, rg2;
+    auto h1 = d1.hash;
+    auto h2 = d2.hash;
 
     if (d1.group == RowPosition::MSB)
     {
+      agg->l.append("1");
         pr1= *tmpRow;
+      h1 = pr1->hash(lastKeyCol);
+      if (h1 == RowPosition::NAH) h1++;
     }
-    else
+    else if (h1 == RowPosition::NAH)
     {
+      agg->l.append("2");
       if (!agg->fResultDataVec[d1.group])
       {
+        agg->l.append("3");
         char fname[1024];
         snprintf(fname, sizeof(fname), "/tmp/kemm/Agg-p%u-t%p-rg%zu", getpid(),
                  agg, d1.group);
@@ -5036,19 +5115,27 @@ inline bool AggComparator::operator()(const RowPosition& d1, const RowPosition& 
       }
       else
       {
+        agg->l.append("4");
         agg->fResultDataVec[d1.group]->getRow(d1.row, &r1);
       }
       pr1= &r1;
+      h1 = pr1->hash(lastKeyCol);
+      if (h1 == RowPosition::NAH) h1++;
     }
 
     if (d2.group == RowPosition::MSB)
     {
+      agg->l.append("5");
       pr2= *tmpRow;
+      h2 = pr2->hash(lastKeyCol);
+      if (h2 == RowPosition::NAH) h2++;
     }
-    else
+    else if (h2 == RowPosition::NAH)
     {
+      agg->l.append("6");
         if (!agg->fResultDataVec[d2.group])
         {
+          agg->l.append("7");
             char fname[1024];
             snprintf(fname, sizeof(fname), "/tmp/kemm/Agg-p%u-t%p-rg%zu", getpid(), agg, d2.group);
             int fd = open(fname, O_RDONLY);
@@ -5069,14 +5156,94 @@ inline bool AggComparator::operator()(const RowPosition& d1, const RowPosition& 
         }
         else
         {
+          agg->l.append("8");
             agg->fResultDataVec[d2.group]->getRow(d2.row, &r2);
         }
         pr2 = &r2;
+      h2 = pr2->hash(lastKeyCol);
+      if (h2 == RowPosition::NAH) h2++;
     }
 
-    ret = pr1->equals(*pr2, lastKeyCol);
-    //cout << "eq=" << (int) ret << " keys=" << keyColCount << ": r1=" << r1.toString() <<
-    //"\n             r2=" << r2.toString() << endl;
+  agg->l.append("(").append(std::to_string(h1)).append(",").append(std::to_string(h2)).append(")");
+  if (h1 != h2)
+    {
+      agg->l.append("9");
+      return false;
+    }
+
+  if (!pr2)
+  {
+    agg->l.append("a");
+    if (!agg->fResultDataVec[d2.group])
+    {
+      agg->l.append("b");
+      char fname[1024];
+      snprintf(fname, sizeof(fname), "/tmp/kemm/Agg-p%u-t%p-rg%zu", getpid(), agg, d2.group);
+      int fd = open(fname, O_RDONLY);
+      if (fd < 0) abort();
+      struct stat st;
+      fstat(fd, &st);
+
+      messageqcpp::ByteStream bs;
+      bs.needAtLeast(st.st_size);
+      bs.restart();
+      auto r = read(fd, bs.getInputPtr(), st.st_size);
+      if (r != st.st_size)
+        abort();
+      bs.advanceInputPtr(r);
+      rg2.deserialize(bs);
+      rg2.getRow(d2.row, &r2);
+      close(fd);
+    }
+    else
+    {
+      agg->l.append("c");
+      agg->fResultDataVec[d2.group]->getRow(d2.row, &r2);
+    }
+    pr2 = &r2;
+    pr2 = &r2;
+  }
+  if (!pr1)
+  {
+    agg->l.append("A");
+    if (!agg->fResultDataVec[d1.group])
+  {
+    agg->l.append("B");
+    char fname[1024];
+    snprintf(fname, sizeof(fname), "/tmp/kemm/Agg-p%u-t%p-rg%zu", getpid(),
+             agg, d1.group);
+    int fd= open(fname, O_RDONLY);
+    if (fd < 0)
+      abort();
+    struct stat st;
+    fstat(fd, &st);
+
+    messageqcpp::ByteStream bs;
+    bs.needAtLeast(st.st_size);
+    bs.restart();
+    auto r= read(fd, bs.getInputPtr(), st.st_size);
+    if (r != st.st_size)
+      abort();
+    bs.advanceInputPtr(r);
+    rg1.deserialize(bs);
+    rg1.getRow(d1.row, &r1);
+    close(fd);
+  }
+  else
+  {
+    agg->l.append("C");
+    agg->fResultDataVec[d1.group]->getRow(d1.row, &r1);
+  }
+    pr1 = &r1;
+  }
+  ret = pr1->equals(*pr2, lastKeyCol);
+  auto i1 = pr1->getIntField(0);
+  auto i2 = pr2->getIntField(0);
+  agg->l.append("{").append(std::to_string(i1)).append(",").append(std::to_string(i2)).append("}");
+  if (!ret && pr1->getIntField(0) == pr2->getIntField(0))
+    cerr << "WTH?!" << endl;
+  //cout << "eq=" << (int) ret << " keys=" << keyColCount << ": r1=" << r1.toString() <<
+  //"\n             r2=" << r2.toString() << endl;
     return ret;
 }
 

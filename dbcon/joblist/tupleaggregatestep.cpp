@@ -5426,9 +5426,9 @@ void TupleAggregateStep::threadedAggregateRowGroups(uint32_t threadID)
                                 throw;
                             }
 
-                            fAgg_mutex[c]->unlock();
                             rowBucketVecs[c][0].clear();
                             bucketDone[c] = true;
+                            fAgg_mutex[c]->unlock();
                         }
                         else if (!bucketDone[c])
                         {
