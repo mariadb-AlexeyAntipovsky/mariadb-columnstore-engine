@@ -5294,8 +5294,9 @@ void TupleAggregateStep::threadedAggregateRowGroups(uint32_t threadID)
 
                     if (more)
                     {
-                        fRowGroupIns[threadID].setData(&rgData);
-                        fMemUsage[threadID] += fRowGroupIns[threadID].getSizeWithStrings();
+                      fRowGroupIns[threadID].setData(&rgData);
+                      fMemUsage[threadID] +=
+                          fRowGroupIns[threadID].getSizeWithStrings();
 
 #if 0
                         char buf[1024];
@@ -5303,6 +5304,7 @@ void TupleAggregateStep::threadedAggregateRowGroups(uint32_t threadID)
                         auto r = write(2, buf, sz);
                         (void)r;
 #endif
+#if 0
                         if (!fRm->getMemory(fRowGroupIns[threadID].getSizeWithStrings(), fSessionMemLimit))
                         {
                             rgDatas.clear();    // to short-cut the rest of processing
@@ -5323,6 +5325,15 @@ void TupleAggregateStep::threadedAggregateRowGroups(uint32_t threadID)
                         {
                             rgDatas.push_back(rgData);
                         }
+#endif
+
+                      rgDatas.push_back(rgData);
+                      if (!fRm->getMemory(
+                              fRowGroupIns[threadID].getSizeWithStrings(),
+                              fSessionMemLimit, false))
+                      {
+                          break;
+                      }
                     }
                     else
                     {

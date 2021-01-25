@@ -927,6 +927,47 @@ protected:
     boost::scoped_ptr<ExtKeyMap_t> fExtKeyMap;
 
     boost::shared_ptr<int64_t> fSessionMemLimit;
+
+    struct LRU
+    {
+        using List = std::list<uint64_t>;
+        inline void add(uint64_t rgid) {
+            auto it = fMap.find(rgid);
+            if (it != fMap.end()) {
+                fList.erase(it->second);
+            }
+            fMap[rgid] = fList.insert(fList.end(), rgid);
+        }
+
+        inline void remove(uint64_t rgid) {
+            auto it = fMap.find(rgid);
+            if (it != fMap.end()) {
+                fMap.erase(it);
+                fList.erase(it->second);
+            }
+        }
+
+        inline List::const_iterator erase(List::const_iterator& it) {
+            uint64_t rgid = *it;
+            auto mit = fMap.find(rgid);
+            assert(mit != fMap.end());
+            assert(mit->second == it);
+            fMap.erase(mit);
+            return fList.erase(it);
+        }
+
+        inline List::const_iterator begin() const { return fList.cbegin(); }
+        inline List::const_iterator end() const { return fList.cend(); }
+        inline void clear() {
+            fMap.clear();
+            fList.clear();
+        }
+
+        std::tr1::unordered_map<uint64_t, List::const_iterator> fMap;
+        std::list<uint64_t> fList;
+    };
+
+    LRU fLRU;
 private:
     uint64_t fLastMemUsage;
     uint32_t fNextRGIndex;

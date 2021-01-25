@@ -860,6 +860,8 @@ void RowAggregationUM::aggReset()
         fExtKeyMapAlloc.reset(new utils::STLPoolAllocator<pair<RowPosition, RowPosition> >());
         fExtKeyMap.reset(new ExtKeyMap_t(10, *fExtHash, *fExtEq, *fExtKeyMapAlloc));
     }
+
+    fLRU.clear();
 }
 
 
@@ -877,7 +879,8 @@ void RowAggregationUM::aggregateRowWithRemap(Row& row)
         // if it was successfully inserted, fix the inserted values
         if (++fTotalRowCount > fMaxTotalRowCount && !newRowGroup())
         {
-            throw logging::IDBExcept(logging::IDBErrorInfo::instance()->
+          std::cerr << "WTF4 too big" << std::endl;
+          throw logging::IDBExcept(logging::IDBErrorInfo::instance()->
                                      errorMsg(logging::ERR_AGGREGATION_TOO_BIG), logging::ERR_AGGREGATION_TOO_BIG);
         }
 
@@ -942,7 +945,6 @@ void RowAggregation::aggregateRow(Row& row)
 
         // do a speculative insert
         tmpRow = &row;
-        auto uid = row.getIntField(0);
         uint64_t h = tmpRow->hash(fGroupByCols.size() - 1);
         if (h == RowPosition::NAH)
             h++;
@@ -950,11 +952,11 @@ void RowAggregation::aggregateRow(Row& row)
 
         if (inserted.second)
         {
-            if (uid == 2457015 || uid == 403164 || uid == 2457014)
-                std::cerr << "WTF: " << uid << std::endl;
             // if it was successfully inserted, fix the inserted values
-            if ((++fTotalRowCount > fMaxTotalRowCount || fRowGroupOut->getRowCount() >= AGG_ROWGROUP_SIZE) && !newRowGroup())
+            ++fTotalRowCount;
+            if (fRowGroupOut->getRowCount() >= AGG_ROWGROUP_SIZE && !newRowGroup())
             {
+                std::cerr << "WTF too big" << std::endl;
                 throw logging::IDBExcept(logging::IDBErrorInfo::instance()->
                                          errorMsg(logging::ERR_AGGREGATION_TOO_BIG), logging::ERR_AGGREGATION_TOO_BIG);
             }
@@ -995,8 +997,6 @@ void RowAggregation::aggregateRow(Row& row)
         }
         else
         {
-            if (uid == 2457015 || uid == 403164 || uid == 2457014)
-                std::cerr << "WTF2: " << uid << std::endl;
             //fRow.setData(*(inserted.first));
             const RowPosition& pos = *(inserted.first);
             getRow(pos, fRow, true);
@@ -3920,11 +3920,11 @@ void RowAggregationUM::setGroupConcatString()
 //------------------------------------------------------------------------------
 bool RowAggregationUM::newRowGroup()
 {
-    uint64_t allocSize = 0;
-    uint64_t memDiff = 0;
+    int64_t allocSize = 0;
+    int64_t memDiff = 0;
     bool     ret = false;
 
-    //allocSize = fRowGroupOut->getSizeWithStrings();
+    allocSize = fRowGroupOut->getSizeWithStrings();
 
     if (fKeyOnHeap)
         memDiff = fKeyStore->getMemUsage() + fExtKeyMapAlloc->getMemUsage() - fLastMemUsage;
@@ -3935,7 +3935,7 @@ bool RowAggregationUM::newRowGroup()
 
     fTotalMemUsage += allocSize + memDiff;
 
-    if (fRm->getMemory(allocSize + memDiff, fSessionMemLimit))
+    if (fRm->getMemory(allocSize + memDiff, fSessionMemLimit, false) || true)
     {
         boost::shared_ptr<RGData> data(new RGData(*fRowGroupOut, AGG_ROWGROUP_SIZE));
 
@@ -3951,6 +3951,7 @@ bool RowAggregationUM::newRowGroup()
             fRowGroupOut->resetRowGroup(0);
             fCurRowGroup= fResultDataVec.size() - 1;
 
+            fLRU.add(fCurRowGroup);
             ret = true;
         }
     }
@@ -3975,6 +3976,9 @@ void RowAggregation::getRow(const RowPosition &pos, Row &row, bool store)
 
 void RowAggregationUM::getRow(const RowPosition &pos, Row &row, bool store)
 {
+    if (pos.group != 0)
+        fLRU.add(pos.group);
+
     if (fResultDataVec[pos.group] != nullptr)
     {
         fResultDataVec[pos.group]->getRow(pos.row, &row);
@@ -3991,6 +3995,10 @@ void RowAggregationUM::getRow(const RowPosition &pos, Row &row, bool store)
     {
         dumpRowGroups();
     }
+
+    int64_t memSz = fRowGroupOut->getSizeWithStrings(AGG_ROWGROUP_SIZE);
+    fRm->getMemory(memSz, fSessionMemLimit, false);
+    fTotalMemUsage += memSz;
 
     char fname[1024];
     makeRGFileName(fname, sizeof(fname), this, pos.group);
@@ -4023,8 +4031,51 @@ void RowAggregationUM::getRow(const RowPosition &pos, Row &row, bool store)
 
 void RowAggregationUM::dumpRowGroups()
 {
+    int64_t memSz = fRowGroupOut->getSizeWithStrings(AGG_ROWGROUP_SIZE);
+    int64_t availMem = fRm->availableMemory();
+
     char fname[1024];
-    for (size_t i= 1; i < fResultDataVec.size(); ++i)
+    std::vector<uint64_t> v;
+    v.reserve(80);
+    for (auto rgid : fLRU.fList)
+    {
+        if (rgid == 0)
+            continue;
+        if (availMem >= memSz * 10)
+            break;
+
+        if (!fResultDataVec[rgid])
+            continue;
+
+        if (!fSecondaryRowDataVec[rgid - 1])
+            ::abort();
+
+        if (fResultDataVec[rgid] != fSecondaryRowDataVec[rgid - 1].get())
+            ::abort();
+
+        auto& rgdata = fSecondaryRowDataVec[rgid - 1];
+        messageqcpp::ByteStream bs;
+        rgdata->serialize(bs, fRowGroupOut->getDataSize(AGG_ROWGROUP_SIZE));
+
+        makeRGFileName(fname, sizeof(fname), this, rgid);
+        int fd = open(fname, O_WRONLY | O_TRUNC | O_CREAT, 0644);
+        if (fd < 0)
+            ::abort();
+
+        auto r = write(fd, bs.buf(), bs.length());
+        (void) r;
+        close(fd);
+
+        fResultDataVec[rgid]= nullptr;
+        fSecondaryRowDataVec[rgid - 1].reset();
+        fRm->returnMemory(memSz, fSessionMemLimit);
+        availMem = fRm->availableMemory();
+        v.push_back(rgid);
+    }
+    for (auto rgid : v)
+        fLRU.remove(rgid);
+#if 0
+  for (size_t i = 1; i < fResultDataVec.size(); ++i)
     {
         if (!fResultDataVec[i])
             continue;
@@ -4035,7 +4086,7 @@ void RowAggregationUM::dumpRowGroups()
         if (fResultDataVec[i] != fSecondaryRowDataVec[i - 1].get())
             ::abort();
 
-        auto& rgdata= fSecondaryRowDataVec[i - 1];
+        auto& rgdata = fSecondaryRowDataVec[i - 1];
         messageqcpp::ByteStream bs;
         fRowGroupOut->setData(rgdata.get());
         rgdata->serialize(bs, fRowGroupOut->getDataSize(AGG_ROWGROUP_SIZE));
@@ -4052,11 +4103,12 @@ void RowAggregationUM::dumpRowGroups()
         fResultDataVec[i]= nullptr;
         fSecondaryRowDataVec[i - 1].reset();
     }
+#endif
 }
 
 void RowAggregationUM::setInputOutput(const RowGroup& pRowGroupIn, RowGroup* pRowGroupOut)
 {
-  RowAggregation::setInputOutput(pRowGroupIn, pRowGroupOut);
+    RowAggregation::setInputOutput(pRowGroupIn, pRowGroupOut);
 
     if (fKeyOnHeap)
     {
@@ -4702,6 +4754,7 @@ void RowAggregationSubDistinct::addRowGroup(const RowGroup* pRows)
             // if it was successfully inserted, fix the inserted values
             if (++fTotalRowCount > fMaxTotalRowCount && !newRowGroup())
             {
+                std::cerr << "WTF2 too big" << std::endl;
                 throw logging::IDBExcept(logging::IDBErrorInfo::instance()->
                                          errorMsg(logging::ERR_AGGREGATION_TOO_BIG), logging::ERR_AGGREGATION_TOO_BIG);
             }
@@ -4744,7 +4797,8 @@ void RowAggregationSubDistinct::addRowGroup(const RowGroup* pRows, std::vector<R
             // if it was successfully inserted, fix the inserted values
             if (++fTotalRowCount > fMaxTotalRowCount && !newRowGroup())
             {
-                throw logging::IDBExcept(logging::IDBErrorInfo::instance()->
+              std::cerr << "WTF3 too big" << std::endl;
+              throw logging::IDBExcept(logging::IDBErrorInfo::instance()->
                                          errorMsg(logging::ERR_AGGREGATION_TOO_BIG), logging::ERR_AGGREGATION_TOO_BIG);
             }
 
@@ -5011,11 +5065,8 @@ inline bool AggComparator::operator()(const RowPosition& d1, const RowPosition& 
 {
     bool ret;
     Row* pr1 = nullptr, *pr2 = nullptr;
-    RGData rg1, rg2;
     auto h1 = d1.hash;
     auto h2 = d2.hash;
-    Row rt1, rt2;
-    RowGroup rgt1, rgt2;
 
     if (d1.group == RowPosition::MSB)
     {
