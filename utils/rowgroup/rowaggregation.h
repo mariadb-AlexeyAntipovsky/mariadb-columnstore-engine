@@ -36,8 +36,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #else
-#include <unordered_map>
-#include <unordered_set>
+#include <tr1/unordered_map>
+#include <tr1/unordered_set>
 #endif
 #include <boost/shared_ptr.hpp>
 #include <boost/shared_array.hpp>
@@ -75,6 +75,20 @@ struct RowPosition
     static const uint64_t MSB = 0x800000000000ULL;   //48th bit is set
     inline RowPosition(uint64_t g, uint64_t r, uint64_t h) : group(g), row(r), hash(h) { }
     inline RowPosition() { }
+    inline RowPosition(const RowPosition& o): group(o.group), row(o.row), hash(o.hash) {}
+    inline RowPosition(RowPosition&& o): group(o.group), row(o.row), hash(o.hash) {}
+    inline RowPosition& operator=(const RowPosition& o) {
+      group = o.group;
+      row = o.row;
+      hash = o.hash;
+      return *this;
+    }
+    inline RowPosition& operator=(RowPosition&& o) {
+      group = o.group;
+      row = o.row;
+      hash = o.hash;
+      return *this;
+    }
 };
 
 /** @brief Enumerates aggregate functions supported by RowAggregation
@@ -402,14 +416,14 @@ private:
     KeyStorage* ks;
 };
 
-typedef std::unordered_set<RowPosition, AggHasher, AggComparator, utils::STLPoolAllocator<RowPosition> >
+typedef std::tr1::unordered_set<RowPosition, AggHasher, AggComparator, utils::STLPoolAllocator<RowPosition> >
 RowAggMap_t;
 
 #if defined(__GNUC__) && (__GNUC__ == 4 && __GNUC_MINOR__ < 5)
 typedef std::tr1::unordered_map<RowPosition, RowPosition, ExternalKeyHasher, ExternalKeyEq,
         utils::STLPoolAllocator<std::pair<const RowPosition, RowPosition> > > ExtKeyMap_t;
 #else
-typedef std::unordered_map<RowPosition, RowPosition, ExternalKeyHasher, ExternalKeyEq,
+typedef std::tr1::unordered_map<RowPosition, RowPosition, ExternalKeyHasher, ExternalKeyEq,
         utils::STLPoolAllocator<std::pair<const RowPosition, RowPosition> > > ExtKeyMap_t;
 #endif
 
@@ -640,6 +654,8 @@ protected:
     }
 
     virtual bool newRowGroup();
+    virtual void getRow(const RowPosition& pos, Row& row, bool store = true);
+    virtual void dumpRowGroups() {};
     virtual void clearAggMap()
     {
         if (fAggMapPtr) fAggMapPtr->clear();
@@ -731,9 +747,7 @@ protected:
     // For UDAF along with with multiple distinct columns
     std::vector<SP_ROWAGG_FUNC_t>* fOrigFunctionCols;
 
-    std::unordered_map<uint32_t, uint64_t> ids;
-    std::string l;
-    int logfd;
+    uint64_t fCurRowGroup= 0;
 };
 
 //------------------------------------------------------------------------------
@@ -846,7 +860,9 @@ protected:
         return true;
     }
 
-    bool newRowGroup();
+    bool newRowGroup() override;
+    void getRow(const RowPosition& pos, Row& row, bool store = true) override;
+    void dumpRowGroups() override;
 
     // calculate the average after all rows received. UM only function.
     void calculateAvgColumns();

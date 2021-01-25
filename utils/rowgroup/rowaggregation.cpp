@@ -595,9 +595,6 @@ RowAggregation::RowAggregation() :
     fSmallSideRGs(NULL), fLargeSideRG(NULL), fSmallSideCount(0),
     fOrigFunctionCols(NULL)
 {
-  char buf[1024];
-  snprintf(buf, sizeof(buf), "/tmp/kemm/Agg-p%u-t%p.log", getpid(), this);
-  logfd = open(buf, O_CREAT | O_APPEND | O_WRONLY, 0644);
 }
 
 
@@ -610,9 +607,6 @@ RowAggregation::RowAggregation(const vector<SP_ROWAGG_GRPBY_t>& rowAggGroupByCol
 {
     fGroupByCols.assign(rowAggGroupByCols.begin(), rowAggGroupByCols.end());
     fFunctionCols.assign(rowAggFunctionCols.begin(), rowAggFunctionCols.end());
-  char buf[1024];
-  snprintf(buf, sizeof(buf), "/tmp/kemm/Agg-p%u-t%p.log", getpid(), this);
-  logfd = open(buf, O_CREAT | O_APPEND | O_WRONLY, 0644);
 }
 
 
@@ -627,9 +621,6 @@ RowAggregation::RowAggregation(const RowAggregation& rhs):
 
     fGroupByCols.assign(rhs.fGroupByCols.begin(), rhs.fGroupByCols.end());
     fFunctionCols.assign(rhs.fFunctionCols.begin(), rhs.fFunctionCols.end());
-  char buf[1024];
-  snprintf(buf, sizeof(buf), "/tmp/kemm/Agg-p%u-t%p.log", getpid(), this);
-  logfd = open(buf, O_CREAT | O_APPEND | O_WRONLY, 0644);
 }
 
 
@@ -643,7 +634,6 @@ RowAggregation::~RowAggregation()
         delete fAggMapPtr;
         fAggMapPtr = NULL;
     }
-    close(logfd);
 }
 
 
@@ -853,8 +843,7 @@ void RowAggregation::aggReset()
         }
     }
 
-    l.clear();
-    ids.clear();
+    fCurRowGroup= 0;
 }
 
 
@@ -879,6 +868,7 @@ void RowAggregationUM::aggregateRowWithRemap(Row& row)
     pair<ExtKeyMap_t::iterator, bool> inserted;
     RowPosition pos(RowPosition::MSB, 0, RowPosition::NAH);
 
+    std::cerr << "RowAggregationUM::aggregateRowWithRemap" << std::endl;
     tmpRow = &row;
     inserted = fExtKeyMap->insert(pair<RowPosition, RowPosition>(pos, pos));
 
@@ -952,56 +942,16 @@ void RowAggregation::aggregateRow(Row& row)
 
         // do a speculative insert
         tmpRow = &row;
+        auto uid = row.getIntField(0);
         uint64_t h = tmpRow->hash(fGroupByCols.size() - 1);
-        l.clear();
-        auto cnt = fAggMapPtr->count(RowPosition(RowPosition::MSB, 0, h));
-        std::string ll = l;
-
-        if (h == RowPosition::NAH) h++;
-        l.clear();
+        if (h == RowPosition::NAH)
+            h++;
         inserted = fAggMapPtr->insert(RowPosition(RowPosition::MSB, 0, h));
-
-        if (inserted.second && cnt != 0)
-        {
-          uint32_t uid= row.getIntField(0);
-          std::cerr << utils::getThreadName() << ": WTBH? uid=" << uid
-                    << ", h=(" << h << "," << ids[uid] << ") l=[" << l << "], " << " ll=[" << ll << "]"
-                    << std::endl;
-        }
 
         if (inserted.second)
         {
-            uint32_t uid = row.getIntField(0);
-            if (ids.count(uid) != 0)
-            {
-              char buf[1024];
-              auto sz = snprintf(buf, sizeof(buf), "%s: tid = %d WTF? uid=%u, h=%lu\n",
-                                utils::getThreadName().c_str(),
-                                gettid(),
-                                uid,
-                                h);
-              auto rsz = write(logfd, buf, sz);
-              (void)rsz;
-              std::cerr << utils::getThreadName()
-                        << ": WTF? tid = " << gettid() << " uid=" << uid
-                        << ", h=(" << h << "," << ids[uid] << ") l=[" << l
-                        << "] ll=" << ll << "]" << std::endl;
-            }
-            else
-              ids.insert(std::pair<uint32_t, uint64_t>(uid, h));
-#if 1
-            char buf[1024];
-            auto sz = snprintf(buf, sizeof(buf), "%s: a=%p tid = %d rows: %lu, %lu, i=%u, h=%lu\n",
-                              utils::getThreadName().c_str(),
-                              fAggMapPtr,
-                              gettid(),
-                              ids.size(),
-                              fAggMapPtr->size(),
-                              uid,
-                              h);
-            auto rsz = write(logfd, buf, sz);
-            (void)rsz;
-#endif
+            if (uid == 2457015 || uid == 403164 || uid == 2457014)
+                std::cerr << "WTF: " << uid << std::endl;
             // if it was successfully inserted, fix the inserted values
             if ((++fTotalRowCount > fMaxTotalRowCount || fRowGroupOut->getRowCount() >= AGG_ROWGROUP_SIZE) && !newRowGroup())
             {
@@ -1009,11 +959,6 @@ void RowAggregation::aggregateRow(Row& row)
                                          errorMsg(logging::ERR_AGGREGATION_TOO_BIG), logging::ERR_AGGREGATION_TOO_BIG);
             }
 
-#if 0
-            sz = snprintf(buf, sizeof(buf), "row2: %lu, %lu, %u\n", fTotalRowCount, fMaxTotalRowCount, fRowGroupOut->getRowCount());
-            rsz = write(2, buf, sz);
-            (void)rsz;
-#endif
             fRowGroupOut->getRow(fRowGroupOut->getRowCount(), &fRow);
             fRowGroupOut->incRowCount();
             initMapData(row);     //seems heavy-handed
@@ -1022,7 +967,7 @@ void RowAggregation::aggregateRow(Row& row)
 
             // replace the key value with an equivalent copy, yes this is OK
             const_cast<RowPosition&>(*(inserted.first)) =
-                RowPosition(fResultDataVec.size() - 1, fRowGroupOut->getRowCount() - 1, h);
+                RowPosition(fCurRowGroup, fRowGroupOut->getRowCount() - 1, h);
 
             // If there's UDAF involved, reset the user data.
             if (fOrigFunctionCols)
@@ -1050,53 +995,11 @@ void RowAggregation::aggregateRow(Row& row)
         }
         else
         {
+            if (uid == 2457015 || uid == 403164 || uid == 2457014)
+                std::cerr << "WTF2: " << uid << std::endl;
             //fRow.setData(*(inserted.first));
             const RowPosition& pos = *(inserted.first);
-            if (!fResultDataVec[pos.group])
-            {
-                for (size_t i = 1; i < fResultDataVec.size(); ++i)
-                {
-                    if (!fResultDataVec[i] || !fSecondaryRowDataVec[i-1])
-                        continue;
-                    if (fResultDataVec[i] != fSecondaryRowDataVec[i-1].get())
-                      abort();
-                    auto& old = fSecondaryRowDataVec[i-1];
-                    fResultDataVec[i] = nullptr;
-                    messageqcpp::ByteStream bs;
-                    old->serialize(bs, fRowGroupOut->getDataSize(AGG_ROWGROUP_SIZE));
-                    char buf[1024];
-                    snprintf(buf, sizeof(buf), "/tmp/kemm/Agg-p%u-t%p-rg%zu", getpid(), this, i);
-                    int fd = open(buf, O_WRONLY | O_TRUNC | O_CREAT, 0644);
-                  if (fd < 0) abort();
-                    auto r = write(fd, bs.buf(), bs.length());
-                    (void)r;
-                    close(fd);
-                    old.reset();
-                }
-                char fname[1024];
-                snprintf(fname, sizeof(fname), "/tmp/kemm/Agg-p%u-t%p-rg%zu", getpid(), this, pos.group);
-                int fd = open(fname, O_RDONLY);
-              if (fd < 0) abort();
-                struct stat st;
-                fstat(fd, &st);
-
-                messageqcpp::ByteStream bs;
-                bs.needAtLeast(st.st_size);
-                bs.restart();
-                auto r = read(fd, bs.getInputPtr(), st.st_size);
-                if (r != st.st_size)
-                    abort();
-                bs.advanceInputPtr(r);
-                if (pos.group == 0)
-                    abort();
-                auto& rst = fSecondaryRowDataVec[pos.group - 1];
-                rst.reset(new RGData());
-                rst->deserialize(bs);
-                fResultDataVec[pos.group] = rst.get();
-                fRowGroupOut->setData(rst.get());
-                close(fd);
-            }
-            fResultDataVec[pos.group]->getRow(pos.row, &fRow);
+            getRow(pos, fRow, true);
         }
     }
 
@@ -2356,6 +2259,7 @@ bool RowAggregation::newRowGroup()
         fSecondaryRowDataVec.push_back(data);
         fResultDataVec.push_back(data.get());
         fMaxTotalRowCount += AGG_ROWGROUP_SIZE;
+        fCurRowGroup = fResultDataVec.size() - 1;
     }
 
     return (data.get() != NULL);
@@ -4039,32 +3943,13 @@ bool RowAggregationUM::newRowGroup()
         {
             fMaxTotalRowCount += AGG_ROWGROUP_SIZE;
 
-            for (size_t i = 1; i < fResultDataVec.size(); ++i)
-            {
-                if (!fResultDataVec[i] || !fSecondaryRowDataVec[i-1])
-                    continue;
-                if (fResultDataVec[i] != fSecondaryRowDataVec[i-1].get())
-                    continue;
-                auto& old = fSecondaryRowDataVec[i-1];
-
-                messageqcpp::ByteStream bs;
-                old->serialize(bs, fRowGroupOut->getDataSize(AGG_ROWGROUP_SIZE));
-                char buf[1024];
-                snprintf(buf, sizeof(buf), "/tmp/kemm/Agg-p%u-t%p-rg%zu",
-                         getpid(), this, i);
-                int fd = open(buf, O_WRONLY | O_TRUNC | O_CREAT, 0644);
-              if (fd < 0) abort();
-                auto r = write(fd, bs.buf(), bs.length());
-                (void) r;
-                close(fd);
-                fResultDataVec[i] = nullptr;
-                fSecondaryRowDataVec[i-1].reset();
-            }
+            dumpRowGroups();
 
             fSecondaryRowDataVec.push_back(data);
             fRowGroupOut->setData(data.get());
             fResultDataVec.push_back(data.get());
             fRowGroupOut->resetRowGroup(0);
+            fCurRowGroup= fResultDataVec.size() - 1;
 
             ret = true;
         }
@@ -4073,9 +3958,105 @@ bool RowAggregationUM::newRowGroup()
     return ret;
 }
 
+static void makeRGFileName(char* buf, size_t bufsz, const void* p, size_t rgNum)
+{
+    snprintf(buf, bufsz, "/tmp/kemm/Agg-p%u-t%p-rg%zu", getpid(), p, rgNum);
+}
+
+void RowAggregation::getRow(const RowPosition &pos, Row &row, bool store)
+{
+    fResultDataVec[pos.group]->getRow(pos.row, &row);
+    if (store)
+    {
+        fRowGroupOut->setData(fResultDataVec[pos.group]);
+        fCurRowGroup = pos.group;
+    }
+}
+
+void RowAggregationUM::getRow(const RowPosition &pos, Row &row, bool store)
+{
+    if (fResultDataVec[pos.group] != nullptr)
+    {
+        fResultDataVec[pos.group]->getRow(pos.row, &row);
+        if (store)
+        {
+            fRowGroupOut->setData(fResultDataVec[pos.group]);
+            fCurRowGroup = pos.group;
+        }
+        return;
+    }
+    assert(pos.group > 0 && pos.group < fResultDataVec.size());
+
+    if (store)
+    {
+        dumpRowGroups();
+    }
+
+    char fname[1024];
+    makeRGFileName(fname, sizeof(fname), this, pos.group);
+    int fd = open(fname, O_RDONLY);
+    if (fd < 0)
+        abort();
+    struct stat st;
+    fstat(fd, &st);
+
+    messageqcpp::ByteStream bs;
+    bs.needAtLeast(st.st_size);
+    bs.restart();
+    auto r = read(fd, bs.getInputPtr(), st.st_size);
+    close(fd);
+    if (r != st.st_size)
+        abort();
+
+    bs.advanceInputPtr(r);
+    auto& rst = fSecondaryRowDataVec[pos.group - 1];
+    rst.reset(new RGData());
+    rst->deserialize(bs);
+    fResultDataVec[pos.group] = rst.get();
+    if (store)
+    {
+        fRowGroupOut->setData(rst.get());
+        fCurRowGroup = pos.group;
+    }
+    fResultDataVec[pos.group]->getRow(pos.row, &row);
+}
+
+void RowAggregationUM::dumpRowGroups()
+{
+    char fname[1024];
+    for (size_t i= 1; i < fResultDataVec.size(); ++i)
+    {
+        if (!fResultDataVec[i])
+            continue;
+
+        if (!fSecondaryRowDataVec[i - 1])
+            ::abort();
+
+        if (fResultDataVec[i] != fSecondaryRowDataVec[i - 1].get())
+            ::abort();
+
+        auto& rgdata= fSecondaryRowDataVec[i - 1];
+        messageqcpp::ByteStream bs;
+        fRowGroupOut->setData(rgdata.get());
+        rgdata->serialize(bs, fRowGroupOut->getDataSize(AGG_ROWGROUP_SIZE));
+
+        makeRGFileName(fname, sizeof(fname), this, i);
+        int fd = open(fname, O_WRONLY | O_TRUNC | O_CREAT, 0644);
+        if (fd < 0)
+            ::abort();
+
+        auto r = write(fd, bs.buf(), bs.length());
+        (void) r;
+        close(fd);
+
+        fResultDataVec[i]= nullptr;
+        fSecondaryRowDataVec[i - 1].reset();
+    }
+}
+
 void RowAggregationUM::setInputOutput(const RowGroup& pRowGroupIn, RowGroup* pRowGroupOut)
 {
-    RowAggregation::setInputOutput(pRowGroupIn, pRowGroupOut);
+  RowAggregation::setInputOutput(pRowGroupIn, pRowGroupOut);
 
     if (fKeyOnHeap)
     {
@@ -4106,38 +4087,20 @@ bool RowAggregationUM::nextRowGroup()
 
     if (more)
     {
-        auto& res = fResultDataVec.back();
+        // load the top result set
+        RowPosition pos;
+        pos.group = fResultDataVec.size() - 1;
+        pos.row = 0;
+        pos.hash = RowPosition::NAH;
+        getRow(pos, fRow, false);
+        fCurRowGroup = pos.group;
+        fRowGroupOut->setData(fResultDataVec.back());
+
         if (fSecondaryRowDataVec.size() < fResultDataVec.size() - 1)
         {
-          fSecondaryRowDataVec.resize(fResultDataVec.size() - 1);
+            fSecondaryRowDataVec.resize(fResultDataVec.size() - 1);
         }
 
-        if (!res)
-        {
-          char fname[1024];
-          snprintf(fname, sizeof(fname), "/tmp/kemm/Agg-p%u-t%p-rg%zu",
-                   getpid(), this, fResultDataVec.size() - 1);
-          int fd= open(fname, O_RDONLY);
-          if (fd < 0) abort();
-          struct stat st;
-          fstat(fd, &st);
-
-          messageqcpp::ByteStream bs;
-          bs.needAtLeast(st.st_size);
-          bs.restart();
-          auto rs= read(fd, bs.getInputPtr(), st.st_size);
-          if (rs != st.st_size)
-            abort();
-          bs.advanceInputPtr(rs);
-
-          auto& rg = fSecondaryRowDataVec[fResultDataVec.size() - 2];
-          rg.reset(new RGData());
-          rg->deserialize(bs);
-          res = rg.get();
-          close(fd);
-        }
-        // load the top result set
-        fRowGroupOut->setData(fResultDataVec.back());
         fResultDataVec.pop_back();
     }
 
@@ -5019,50 +4982,21 @@ inline uint64_t AggHasher::operator()(const RowPosition& data) const
     RGData rg;
 
     if (data.hash != RowPosition::NAH)
-    {
-      agg->l.append("H");
-      return data.hash;
-    }
+        return data.hash;
 
     if (data.group == RowPosition::MSB)
     {
-      agg->l.append("T");
-      row= *tmpRow;
+        row = *tmpRow;
     }
     else
     {
-      agg->l.append("t");
-        if (!agg->fResultDataVec[data.group])
-        {
-            char fname[1024];
-            snprintf(fname, sizeof(fname), "/tmp/kemm/Agg-p%u-t%p-rg%zu", getpid(), agg, data.group);
-            int fd = open(fname, O_RDONLY);
-            if (fd < 0) abort();
-            struct stat st;
-            fstat(fd, &st);
-
-            messageqcpp::ByteStream bs;
-            bs.needAtLeast(st.st_size);
-            bs.restart();
-            auto rs = read(fd, bs.getInputPtr(), st.st_size);
-            if (rs != st.st_size)
-                abort();
-            bs.advanceInputPtr(rs);
-            rg.deserialize(bs);
-            rg.getRow(data.row, &r);
-            close(fd);
-        }
-        else
-        {
-            agg->fResultDataVec[data.group]->getRow(data.row, &r);
-        }
+        agg->getRow(data, r, false);
         row = &r;
     }
 
     ret = row->hash(lastKeyCol);
     if (ret == RowPosition::NAH)
-      ret++;
-    agg->l.append("[").append(std::to_string(ret)).append("]");
+        ret++;
     //cout << "hash=" << ret << " keys=" << keyColCount << " row=" << r.toString() << endl;
     return ret;
 }
@@ -5080,170 +5014,63 @@ inline bool AggComparator::operator()(const RowPosition& d1, const RowPosition& 
     RGData rg1, rg2;
     auto h1 = d1.hash;
     auto h2 = d2.hash;
+    Row rt1, rt2;
+    RowGroup rgt1, rgt2;
 
     if (d1.group == RowPosition::MSB)
     {
-      agg->l.append("1");
-        pr1= *tmpRow;
-      h1 = pr1->hash(lastKeyCol);
-      if (h1 == RowPosition::NAH) h1++;
+        pr1 = *tmpRow;
+        if (d1.hash != RowPosition::NAH)
+        {
+          h1 = pr1->hash(lastKeyCol);
+          if (h1 == RowPosition::NAH)
+              h1++;
+        }
     }
     else if (h1 == RowPosition::NAH)
     {
-      agg->l.append("2");
-      if (!agg->fResultDataVec[d1.group])
-      {
-        agg->l.append("3");
-        char fname[1024];
-        snprintf(fname, sizeof(fname), "/tmp/kemm/Agg-p%u-t%p-rg%zu", getpid(),
-                 agg, d1.group);
-        int fd= open(fname, O_RDONLY);
-        if (fd < 0) abort();
-        struct stat st;
-        fstat(fd, &st);
-
-        messageqcpp::ByteStream bs;
-        bs.needAtLeast(st.st_size);
-        bs.restart();
-        auto r= read(fd, bs.getInputPtr(), st.st_size);
-        if (r != st.st_size)
-          abort();
-        bs.advanceInputPtr(r);
-        rg1.deserialize(bs);
-        rg1.getRow(d1.row, &r1);
-        close(fd);
-      }
-      else
-      {
-        agg->l.append("4");
-        agg->fResultDataVec[d1.group]->getRow(d1.row, &r1);
-      }
-      pr1= &r1;
-      h1 = pr1->hash(lastKeyCol);
-      if (h1 == RowPosition::NAH) h1++;
+        agg->getRow(d1, r1, false);
+        pr1= &r1;
+        h1 = pr1->hash(lastKeyCol);
+        if (h1 == RowPosition::NAH)
+            h1++;
     }
 
     if (d2.group == RowPosition::MSB)
     {
-      agg->l.append("5");
-      pr2= *tmpRow;
-      h2 = pr2->hash(lastKeyCol);
-      if (h2 == RowPosition::NAH) h2++;
+        pr2 = *tmpRow;
+        if (d2.hash == RowPosition::NAH)
+        {
+            h2= pr2->hash(lastKeyCol);
+            if (h2 == RowPosition::NAH)
+                h2++;
+        }
     }
     else if (h2 == RowPosition::NAH)
     {
-      agg->l.append("6");
-        if (!agg->fResultDataVec[d2.group])
-        {
-          agg->l.append("7");
-            char fname[1024];
-            snprintf(fname, sizeof(fname), "/tmp/kemm/Agg-p%u-t%p-rg%zu", getpid(), agg, d2.group);
-            int fd = open(fname, O_RDONLY);
-          if (fd < 0) abort();
-          struct stat st;
-            fstat(fd, &st);
+        agg->getRow(d2, r2, false);
+        h2 = pr2->hash(lastKeyCol);
+        if (h2 == RowPosition::NAH)
+            h2++;
+    }
 
-            messageqcpp::ByteStream bs;
-            bs.needAtLeast(st.st_size);
-            bs.restart();
-            auto r = read(fd, bs.getInputPtr(), st.st_size);
-            if (r != st.st_size)
-                abort();
-            bs.advanceInputPtr(r);
-            rg2.deserialize(bs);
-            rg2.getRow(d2.row, &r2);
-            close(fd);
-        }
-        else
-        {
-          agg->l.append("8");
-            agg->fResultDataVec[d2.group]->getRow(d2.row, &r2);
-        }
+    if (h1 != h2)
+        return false;
+
+    if (!pr1)
+    {
+        agg->getRow(d1, r1, false);
+        pr1 = &r1;
+    }
+    if (!pr2)
+    {
+        agg->getRow(d2, r2, false);
         pr2 = &r2;
-      h2 = pr2->hash(lastKeyCol);
-      if (h2 == RowPosition::NAH) h2++;
     }
 
-  agg->l.append("(").append(std::to_string(h1)).append(",").append(std::to_string(h2)).append(")");
-  if (h1 != h2)
-    {
-      agg->l.append("9");
-      return false;
-    }
-
-  if (!pr2)
-  {
-    agg->l.append("a");
-    if (!agg->fResultDataVec[d2.group])
-    {
-      agg->l.append("b");
-      char fname[1024];
-      snprintf(fname, sizeof(fname), "/tmp/kemm/Agg-p%u-t%p-rg%zu", getpid(), agg, d2.group);
-      int fd = open(fname, O_RDONLY);
-      if (fd < 0) abort();
-      struct stat st;
-      fstat(fd, &st);
-
-      messageqcpp::ByteStream bs;
-      bs.needAtLeast(st.st_size);
-      bs.restart();
-      auto r = read(fd, bs.getInputPtr(), st.st_size);
-      if (r != st.st_size)
-        abort();
-      bs.advanceInputPtr(r);
-      rg2.deserialize(bs);
-      rg2.getRow(d2.row, &r2);
-      close(fd);
-    }
-    else
-    {
-      agg->l.append("c");
-      agg->fResultDataVec[d2.group]->getRow(d2.row, &r2);
-    }
-    pr2 = &r2;
-    pr2 = &r2;
-  }
-  if (!pr1)
-  {
-    agg->l.append("A");
-    if (!agg->fResultDataVec[d1.group])
-  {
-    agg->l.append("B");
-    char fname[1024];
-    snprintf(fname, sizeof(fname), "/tmp/kemm/Agg-p%u-t%p-rg%zu", getpid(),
-             agg, d1.group);
-    int fd= open(fname, O_RDONLY);
-    if (fd < 0)
-      abort();
-    struct stat st;
-    fstat(fd, &st);
-
-    messageqcpp::ByteStream bs;
-    bs.needAtLeast(st.st_size);
-    bs.restart();
-    auto r= read(fd, bs.getInputPtr(), st.st_size);
-    if (r != st.st_size)
-      abort();
-    bs.advanceInputPtr(r);
-    rg1.deserialize(bs);
-    rg1.getRow(d1.row, &r1);
-    close(fd);
-  }
-  else
-  {
-    agg->l.append("C");
-    agg->fResultDataVec[d1.group]->getRow(d1.row, &r1);
-  }
-    pr1 = &r1;
-  }
-  ret = pr1->equals(*pr2, lastKeyCol);
-  auto i1 = pr1->getIntField(0);
-  auto i2 = pr2->getIntField(0);
-  agg->l.append("{").append(std::to_string(i1)).append(",").append(std::to_string(i2)).append("}");
-  if (!ret && pr1->getIntField(0) == pr2->getIntField(0))
-    cerr << "WTH?!" << endl;
-  //cout << "eq=" << (int) ret << " keys=" << keyColCount << ": r1=" << r1.toString() <<
-  //"\n             r2=" << r2.toString() << endl;
+    ret = pr1->equals(*pr2, lastKeyCol);
+    //cout << "eq=" << (int) ret << " keys=" << keyColCount << ": r1=" << r1.toString() <<
+    //"\n             r2=" << r2.toString() << endl;
     return ret;
 }
 

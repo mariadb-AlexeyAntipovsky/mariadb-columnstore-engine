@@ -402,6 +402,7 @@ RGData::RGData(const RowGroup& rg, uint32_t rowCount)
      */
     memset(rowData.get(), 0, rg.getDataSize(rowCount));   // XXXPAT: make valgrind happy temporarily
 #endif
+  memset(rowData.get(), 0, rg.getDataSize(rowCount));   // XXXPAT: make valgrind happy temporarily
 }
 
 RGData::RGData(const RowGroup& rg)
@@ -574,12 +575,13 @@ Row& Row::operator=(const Row& r)
     return *this;
 }
 
-string Row::toString() const
+string Row::toString(uint32_t rownum) const
 {
     ostringstream os;
     uint32_t i;
 
     //os << getRid() << ": ";
+    os << "[" << std::setw(5) << rownum << std::setw(0) << "]: ";
     os << (int) useStringTable << ": ";
 
     for (i = 0; i < columnCount; i++)
@@ -1451,7 +1453,7 @@ string RowGroup::toString() const
 
         for (uint32_t i = 0; i < getRowCount(); i++)
         {
-            os << r.toString() << endl;
+            os << r.toString(i) << endl;
             r.nextRow();
         }
     }
