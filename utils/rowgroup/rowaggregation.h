@@ -55,6 +55,11 @@
 
 #include "collation.h"
 
+// kemm
+#include <stdio.h>
+#include <fcntl.h>
+#include "resourcemanager.h"
+
 // To do: move code that depends on joblist to a proper subsystem.
 namespace joblist
 {
@@ -378,6 +383,7 @@ public:
 
     inline RowPosition addKey();
     inline uint64_t getMemUsage();
+    void getRow(const RowPosition& pos, Row& r);
 
 private:
     Row row;
@@ -655,7 +661,7 @@ protected:
 
     virtual bool newRowGroup();
     virtual void getRow(const RowPosition& pos, Row& row, bool store = true);
-    virtual void dumpRowGroups() {};
+    virtual void dumpRowGroups(int minFree = 3) {};
     virtual void clearAggMap()
     {
         if (fAggMapPtr) fAggMapPtr->clear();
@@ -696,9 +702,10 @@ protected:
 
     RGData*                                         fPrimaryRowData;
 
-    std::vector<boost::shared_ptr<RGData> >         fSecondaryRowDataVec;
+    //std::vector<boost::shared_ptr<RGData> >         fSecondaryRowDataVec;
+    std::vector<std::unique_ptr<RGData> >         fSecondaryRowDataVec;
 
-    // for support PM aggregation after PM hashjoin
+  // for support PM aggregation after PM hashjoin
     std::vector<RowGroup>*                          fSmallSideRGs;
     RowGroup*                                       fLargeSideRG;
     boost::shared_array<boost::shared_array<int> >  fSmallMappings;
@@ -774,7 +781,7 @@ public:
 
     /** @brief Denotes end of data insertion following multiple calls to addRowGroup().
      */
-    void endOfInput();
+    void endOfInput() override;
 
     /** @brief Finializes the result set before sending back to the front end.
      */
@@ -811,7 +818,7 @@ public:
     {
         return fRm;
     }
-    inline virtual RowAggregationUM* clone() const
+    inline virtual RowAggregationUM* clone() const override
     {
         return new RowAggregationUM (*this);
     }
@@ -838,20 +845,20 @@ public:
         return fGroupConcat;
     }
 
-    void aggregateRow(Row&);
+    void aggregateRow(Row&) override;
     //void initialize();
-    virtual void aggReset();
+    virtual void aggReset() override;
 
-    void setInputOutput(const RowGroup& pRowGroupIn, RowGroup* pRowGroupOut);
+    void setInputOutput(const RowGroup& pRowGroupIn, RowGroup* pRowGroupOut) override;
 
 protected:
     // virtual methods from base
-    void initialize();
+    void initialize() override;
     void aggregateRowWithRemap(Row&);
 
-    void attachGroupConcatAg();
-    void updateEntry(const Row& row);
-    bool countSpecial(const RowGroup* pRG)
+    void attachGroupConcatAg() override;
+    void updateEntry(const Row& row) override;
+    bool countSpecial(const RowGroup* pRG) override
     {
         fRow.setIntField<8>(
             fRow.getIntField<8>(
@@ -862,7 +869,7 @@ protected:
 
     bool newRowGroup() override;
     void getRow(const RowPosition& pos, Row& row, bool store = true) override;
-    void dumpRowGroups() override;
+    void dumpRowGroups(int minFree = 3) override;
 
     // calculate the average after all rows received. UM only function.
     void calculateAvgColumns();
@@ -968,6 +975,64 @@ protected:
     };
 
     LRU fLRU;
+#if 0
+    struct MemStat {
+        MemStat() = delete;
+        explicit MemStat(const RowAggregationUM* p) : fAgg(p) {
+            char buf[1024];
+            snprintf(buf, sizeof(buf), "/tmp/kemm/AggStat-p%u-t%p.csv", getpid(), p);
+            fFd = open(buf, O_CREAT | O_APPEND | O_WRONLY, 0644);
+            auto sz = snprintf(buf, sizeof(buf),
+                               "ts,um_min,um_max,s_min,s_max,f_min,f_max\n");
+            write(fFd, buf, sz);
+        }
+        ~MemStat() {
+            dumpLog();
+            close(fFd);
+        }
+        inline void tick() noexcept {
+            time_t now = time(nullptr);
+            if (fLastTs != 0 && fLastTs != now)
+                dumpLog();
+
+            fLastTs = now;
+            fUm.min = std::min((int64_t)fAgg->fTotalMemUsage, fUm.min);
+            fUm.max = std::max((int64_t)fAgg->fTotalMemUsage, fUm.max);
+            if (fAgg->fAlloc) {
+                fAggMap.min = std::min((int64_t)fAgg->fAlloc->getMemUsage(), fAggMap.min);
+                fAggMap.max = std::max((int64_t)fAgg->fAlloc->getMemUsage(), fAggMap.max);
+            }
+            fFree.min = std::min(fAgg->fRm->availableMemory(), fFree.min);
+            fFree.max = std::max(fAgg->fRm->availableMemory(), fFree.max);
+        }
+
+        inline void dumpLog() noexcept {
+            char buf[1024];
+            auto sz = snprintf(buf, sizeof(buf),
+                               "%ld,%ld,%ld,%ld,%ld,%ld,%ld\n",
+                               fLastTs, fUm.min, fUm.max, fAggMap.min, fAggMap.max, fFree.min, fFree.max);
+            write(fFd, buf, sz);
+            fUm.reset();
+            fAggMap.reset();
+            fFree.reset();
+        }
+        int fFd = -1;
+        struct Entry {
+            int64_t min = std::numeric_limits<int64_t>::max();
+            int64_t max = std::numeric_limits<int64_t>::min();
+            inline void reset() noexcept {
+                min = std::numeric_limits<int64_t>::max();
+                max = std::numeric_limits<int64_t>::min();
+            }
+        };
+        Entry fUm;
+        Entry fAggMap;
+        Entry fFree;
+        time_t fLastTs = 0;
+        const RowAggregationUM* fAgg = nullptr;
+    };
+    MemStat fMemStat;
+#endif
 private:
     uint64_t fLastMemUsage;
     uint32_t fNextRGIndex;

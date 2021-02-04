@@ -5696,7 +5696,7 @@ uint64_t TupleAggregateStep::doThreadedAggregate(ByteStream& bs, RowGroupDL* dlp
                                     char from[1024], to[1024];
                                     snprintf(from, sizeof(from), "/tmp/kemm/Agg-p%u-t%p-rg%zu", getpid(), fAggregators[i].get(), j);
                                     snprintf(to, sizeof(to), "/tmp/kemm/Agg-p%u-t%p-rg%zu", getpid(), fAggregator.get(), fAggregator->resultDataVec().size());
-                                    symlink(from, to);
+                                    link(from, to);
                                     fAggregator->resultDataVec().push_back(nullptr);
                                   }
                                   else
