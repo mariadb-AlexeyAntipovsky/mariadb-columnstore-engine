@@ -2410,7 +2410,7 @@ RowAggregationUM::~RowAggregationUM()
     for (size_t i = 1; i < fResultDataVec.size(); ++i)
     {
         makeRGFileName(fname, sizeof(fname), this, i);
-        unlink(fname);
+        //unlink(fname);
     }
     // on UM, a groupby column may be not a projected column, key is separated from output
     // and is stored on heap, need to return the space to heap at the end.
@@ -3984,6 +3984,19 @@ bool RowAggregationUM::newRowGroup()
     int64_t memDiff = 0;
     bool     ret = false;
 
+
+    for (auto it = fLRU.fList.rbegin(); it != fLRU.fList.rend(); ++it)
+    {
+      auto rgid = *it;
+      fRowGroupOut->setData(fResultDataVec[rgid]);
+      if (fRowGroupOut->getRowCount() < AGG_ROWGROUP_SIZE)
+      {
+        fLRU.add(rgid);
+        fCurRowGroup = rgid;
+        return true;
+      }
+    }
+
     allocSize = fRowGroupOut->getSizeWithStrings();
 
     if (fKeyOnHeap)
@@ -4085,6 +4098,8 @@ void RowAggregationUM::getRow(const RowPosition &pos, Row &row, bool store)
     fResultDataVec[pos.group]->getRow(pos.row, &row);
 }
 
+static bool metaDumped = false;
+
 void RowAggregationUM::dumpRowGroups(int minFree)
 {
     int64_t memSz = fRowGroupOut->getSizeWithStrings(AGG_ROWGROUP_SIZE);
@@ -4092,7 +4107,21 @@ void RowAggregationUM::dumpRowGroups(int minFree)
     if (availMem >= memSz * minFree)
         return;
 
-    char fname[1024];
+    if (!metaDumped) {
+      metaDumped = true;
+
+      messageqcpp::ByteStream bs;
+      fRowGroupOut->serialize(bs);
+
+      int fd = open("/tmp/kemm/META", O_WRONLY | O_TRUNC | O_CREAT, 0644);
+      if (fd < 0)
+        ::abort();
+
+      auto r = write(fd, bs.buf(), bs.length());
+      (void) r;
+      close(fd);
+    }
+  char fname[1024];
     std::vector<uint64_t> v;
     v.reserve(80);
     for (auto rgid : fLRU.fList)
@@ -4198,6 +4227,11 @@ bool RowAggregationUM::nextRowGroup()
 
     if (more)
     {
+        if (fSecondaryRowDataVec.size() < fResultDataVec.size() - 1)
+        {
+          fSecondaryRowDataVec.resize(fResultDataVec.size() - 1);
+        }
+
         // load the top result set
         RowPosition pos;
         pos.group = fResultDataVec.size() - 1;
@@ -4207,20 +4241,17 @@ bool RowAggregationUM::nextRowGroup()
         fCurRowGroup = pos.group;
         fRowGroupOut->setData(fResultDataVec.back());
 
-        if (fSecondaryRowDataVec.size() < fResultDataVec.size() - 1)
-        {
-            fSecondaryRowDataVec.resize(fResultDataVec.size() - 1);
-        }
-
         if (fCurRowGroup != 0)
         {
             char fname[1024];
             makeRGFileName(fname, sizeof(fname), this, fCurRowGroup);
-            unlink(fname);
+            //unlink(fname);
         }
         fResultDataVec.pop_back();
-        if (!fSecondaryRowDataVec.empty())
+        while (fSecondaryRowDataVec.size() > fResultDataVec.size())
+        {
             fSecondaryRowDataVec.pop_back();
+        }
     }
 
     return more;

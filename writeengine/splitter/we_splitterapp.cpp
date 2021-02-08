@@ -486,6 +486,10 @@ void WESplitterApp::invokeCpimport()
     {
         //we need something that works on Windows as well as linux
         v2[i++] = arg;
+        if (i >= v2.size())
+        {
+            v2.resize(v2.size() * 2, "");
+        }
     }
 
     for (unsigned int j = 0; j < i; ++j)
